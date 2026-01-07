@@ -62,41 +62,69 @@ void save_response(const http::response<http::dynamic_body>& res, const std::str
 
 // Handle HTTP redirects with a limit of 10
 std::string handle_redirect(http::response<http::dynamic_body>& res, const std::string& url, std::string& redirect_url, size_t& redirects, std::set<std::string>& visited_urls) {
-    if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
-        redirect_url = res.base()[http::field::location].to_string();
-
-        // If the Location header is relative (e.g. "/foo"), convert it to an absolute URL
-        if (redirect_url.rfind("http", 0) != 0) {
-            // Parse scheme and host from the current URL
-            size_t scheme_end = url.find("://");
-            if (scheme_end != std::string::npos) {
-                std::string scheme = url.substr(0, scheme_end);
-                size_t host_start = scheme_end + 3;
-                size_t path_pos = url.find('/', host_start);
-                std::string host = (path_pos == std::string::npos) ? url.substr(host_start) : url.substr(host_start, path_pos - host_start);
-                if (!redirect_url.empty() && redirect_url[0] == '/') {
-                    redirect_url = scheme + "://" + host + redirect_url;
-                } else {
-                    redirect_url = scheme + "://" + host + "/" + redirect_url;
+    // First try standard Location header
+    if (res.result_int() >= 300 && res.result_int() < 400) {
+        if (res.base().count(http::field::location)) {
+            redirect_url = res.base()[http::field::location].to_string();
+        } else {
+            // Fallback: some servers embed a link in an HTML body instead of Location header
+            try {
+                std::string body = boost::beast::buffers_to_string(res.body().data());
+                std::smatch m;
+                // Look for <meta http-equiv="refresh" content="0;URL='...'"> or <a href="...">
+                std::regex meta_re("<meta[^>]*refresh[^>]*content=[\"']?\s*\d+;\s*url=([^\"'>]+)[\"'>]?", std::regex::icase);
+                std::regex href_re("<a[^>]*href=[\"']?([^\"'>]+)[\"'>]?", std::regex::icase);
+                if (std::regex_search(body, m, meta_re) && m.size() > 1) {
+                    redirect_url = m[1].str();
+                } else if (std::regex_search(body, m, href_re) && m.size() > 1) {
+                    redirect_url = m[1].str();
                 }
+            } catch (...) {
+                // ignore parsing errors, treat as no Location found
             }
         }
 
-        // Check if the redirect URL is the same as the current one or has already been visited
-        if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
-            std::cout << "Redirect loop detected, stopping...\n";
-            return "";  // Return empty to stop redirects
-        }
+        if (!redirect_url.empty()) {
+            // Handle protocol-relative URLs (e.g. //host/path)
+            if (redirect_url.rfind("//", 0) == 0) {
+                size_t scheme_end = url.find("://");
+                std::string scheme = (scheme_end != std::string::npos) ? url.substr(0, scheme_end) : "http";
+                redirect_url = scheme + ":" + redirect_url;
+            }
 
-        std::cout << "Redirecting to: " << redirect_url << "\n";
-        visited_urls.insert(redirect_url);  // Mark this URL as visited
-        ++redirects;
-        if (redirects > 10) {
-            std::cerr << "Error: Too many redirects\n";
-            std::cout << "error: Too many redirects\n";
-            return "";  // Stop after 10 redirects
+            // If the Location header is relative (e.g. "/foo" or "foo"), convert it to an absolute URL
+            if (redirect_url.rfind("http", 0) != 0) {
+                // Parse scheme and host from the current URL
+                size_t scheme_end = url.find("://");
+                if (scheme_end != std::string::npos) {
+                    std::string scheme = url.substr(0, scheme_end);
+                    size_t host_start = scheme_end + 3;
+                    size_t path_pos = url.find('/', host_start);
+                    std::string host = (path_pos == std::string::npos) ? url.substr(host_start) : url.substr(host_start, path_pos - host_start);
+                    if (!redirect_url.empty() && redirect_url[0] == '/') {
+                        redirect_url = scheme + "://" + host + redirect_url;
+                    } else {
+                        redirect_url = scheme + "://" + host + "/" + redirect_url;
+                    }
+                }
+            }
+
+            // Check if the redirect URL is the same as the current one or has already been visited
+            if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
+                std::cout << "Redirect loop detected, stopping...\n";
+                return "";  // Return empty to stop redirects
+            }
+
+            std::cout << "Redirecting to: " << redirect_url << "\n";
+            visited_urls.insert(redirect_url);  // Mark this URL as visited
+            ++redirects;
+            if (redirects > 10) {
+                std::cerr << "Error: Too many redirects\n";
+                std::cout << "error: Too many redirects\n";
+                return "";  // Stop after 10 redirects
+            }
+            return redirect_url;  // Return the new URL for the next redirection
         }
-        return redirect_url;  // Return the new URL for the next redirection
     }
     return "";  // No redirection
 }
@@ -144,10 +172,13 @@ void get_url(std::string& url, const std::string& output_file) {
 
                 print_response(res);
                 redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
-                if (redirect_url.empty()) break;  // If no more redirects, break out of loop
-
-                body_size = res.body().size();
-                save_response(res, output_file);
+                if (redirect_url.empty()) {
+                    // No redirect -> this is the final response, save it
+                    body_size = res.body().size();
+                    save_response(res, output_file);
+                    break;  // Done
+                }
+                // Otherwise there's a redirect -> do not save this response body, follow the redirect
             } else {
                 // HTTP (non-SSL)
                 asio::connect(socket, results.begin(), results.end());
@@ -163,10 +194,13 @@ void get_url(std::string& url, const std::string& output_file) {
 
                 print_response(res);
                 redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
-                if (redirect_url.empty()) break;  // If no more redirects, break out of loop
-
-                body_size = res.body().size();
-                save_response(res, output_file);
+                if (redirect_url.empty()) {
+                    // No redirect -> this is the final response, save it
+                    body_size = res.body().size();
+                    save_response(res, output_file);
+                    break;  // Done
+                }
+                // Otherwise there's a redirect -> do not save this response body, follow the redirect
             }
 
             if (!redirect_url.empty()) {
