@@ -2,7 +2,6 @@
 #include <fstream>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
-#include <boost/beast/ssl.hpp>
 #include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <iomanip>
@@ -44,6 +43,7 @@ void print_response(const http::response<http::dynamic_body>& res) {
     }
 }
 
+
 void save_response(const http::response<http::dynamic_body>& res, const std::string& outfile) {
     if (!outfile.empty()) {
         std::ofstream ofs(outfile, std::ios::binary);
@@ -54,6 +54,7 @@ void save_response(const http::response<http::dynamic_body>& res, const std::str
         ofs.close();
     }
 }
+
 
 std::string handle_redirect(http::response<http::dynamic_body>& res, const std::string& url, std::string& redirect_url, size_t& redirects, std::set<std::string>& visited_urls) {
     if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
@@ -165,7 +166,7 @@ int main(int argc, char* argv[]) {
                 output_file = optarg;
                 break;
             default:
-                break; // Ignore any unsupported options
+                break;
         }
     }
 
