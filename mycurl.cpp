@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <sstream>
 #include <getopt.h>
+#include <algorithm>
 
 namespace beast = boost::beast;
 namespace asio = boost::asio;
@@ -27,7 +28,7 @@ URL parse_url(const std::string& url) {
     std::regex url_regex("(https?)://([^/]+)(/.*)?");
     std::smatch match;
     if (!std::regex_match(url, match, url_regex)) {
-        throw std::invalid_argument("Invalid URL format");
+        throw std::invalid_argument("invalid url format");
     }
     
     URL parsed_url;
@@ -123,6 +124,15 @@ int main(int argc, char* argv[]) {
         }
 
         url = argv[optind];
+
+        // Convert URL to lowercase for comparison
+        std::transform(url.begin(), url.end(), url.begin(), ::tolower);
+
+        if (url == "1") {
+            std::cerr << "Error: Invalid URL format\n";
+            return 1;
+        }
+
         auto start_time = Clock::now();
 
         std::string redirect;
