@@ -1,6 +1,6 @@
 CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
-LDFLAGS  :=
+LDFLAGS  := 
 LDLIBS   := -lssl -lcrypto -lpthread
 TARGET   := mycurl
 SRC      := mycurl.cpp
@@ -11,6 +11,6 @@ $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
 
 clean:
-	rm -f $(TARGET) $(TARGET2)
+	rm -f $(TARGET)
 
 .PHONY: all clean
