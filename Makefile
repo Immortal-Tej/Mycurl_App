@@ -1,11 +1,7 @@
-# Simple Makefile for mycurl
-
-## Adjust CXX/CXXFLAGS and SRC to fit if your doing C or C++. 
-
 CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 LDFLAGS  :=
-LDLIBS   := -lssl -lcrypto
+LDLIBS   := -lssl -lcrypto -lpthread
 TARGET   := mycurl
 SRC      := mycurl.cpp
 
