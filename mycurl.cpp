@@ -175,23 +175,48 @@ int main(int argc, char* argv[]) {
     std::string url;
     std::string output_file;
 
-    // Argument parsing using getopt
-    int opt;
-    while ((opt = getopt(argc, argv, "o:")) != -1) {
-        switch (opt) {
-            case 'o':
-                output_file = optarg;
-                break;
-            default:
-                std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
-                std::cout << "error: Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
+    // Simple argument parsing to support -o and --output
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-o") {
+            if (i + 1 < argc) {
+                output_file = argv[++i];
+            } else {
+                std::cerr << "Error: Missing argument for -o" << std::endl;
+                std::cout << "error: Missing argument for -o" << std::endl;
                 return 1;
+            }
+        } else if (arg.rfind("--output", 0) == 0) {
+            auto pos = arg.find('=');
+            if (pos != std::string::npos) {
+                output_file = arg.substr(pos + 1);
+            } else {
+                if (i + 1 < argc) {
+                    output_file = argv[++i];
+                } else {
+                    std::cerr << "Error: Missing argument for --output" << std::endl;
+                    std::cout << "error: Missing argument for --output" << std::endl;
+                    return 1;
+                }
+            }
+        } else if (!arg.empty() && arg[0] == '-') {
+            // Unknown option
+            std::string optname = arg.size() > 1 ? arg.substr(1) : arg;
+            std::cerr << "Error: Invalid option -- '" << optname << "'" << std::endl;
+            std::cout << "error: invalid option -- '" << optname << "'" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
+            std::cout << "error: Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
+            return 1;
+        } else {
+            if (url.empty()) {
+                url = arg;
+            } else {
+                // ignore extra positional arguments
+            }
         }
     }
 
-    if (optind < argc) {
-        url = argv[optind];
-    } else {
+    if (url.empty()) {
         std::cerr << "URL is required!" << std::endl;
         std::cout << "error: URL is required!" << std::endl;
         return 1;
