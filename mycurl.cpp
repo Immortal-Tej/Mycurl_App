@@ -78,7 +78,7 @@ std::string handle_redirect(const http::response<http::dynamic_body>& res, const
             if (!redirect_url.empty() && redirect_url[0] == '/') redirect_url = scheme + "://" + host + redirect_url; else redirect_url = scheme + "://" + host + "/" + redirect_url;
         }
     }
-    ++redirects; if (redirects>10){ std::cerr<<"Error: Too many redirects\n"; std::cout<<"error: Too many redirects\n"; return ""; } return redirect_url;
+    std::cout << "redirecting to: " << redirect_url << "\n"; ++redirects; if (redirects>10){ std::cerr<<"Error: Too many redirects\n"; std::cout<<"error: Too many redirects\n"; return ""; } return redirect_url;
 }
 
 template<typename Stream> void perform_request(Stream& stream, const Url& parsed_url, http::response<http::dynamic_body>& res) { http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11}; req.set(http::field::host, parsed_url.host); req.set(http::field::user_agent, "mycurl"); http::write(stream, req); beast::flat_buffer buffer; http::read(stream, buffer, res); }
