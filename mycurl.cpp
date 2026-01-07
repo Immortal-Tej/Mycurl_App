@@ -177,7 +177,7 @@ int main(int argc, char* argv[]) {
                 output_file = optarg;
                 break;
             default:
-                break; // Ignore any other options
+                break;
         }
     }
 
