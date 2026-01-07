@@ -23,7 +23,7 @@ struct Url {
 
 // Parse the URL into scheme, host, port, and path
 Url parse_url(const std::string& url) {
-    std::regex url_regex("(https?)://([^/]+)(/.*)?");
+    std::regex url_regex("(https?)://([^/:]+)(?::(\\d+))?(/.*)?");
     std::smatch match;
     if (!std::regex_match(url, match, url_regex)) {
         throw std::invalid_argument("Invalid URL format");
@@ -32,10 +32,10 @@ Url parse_url(const std::string& url) {
     Url parsed_url;
     parsed_url.scheme = match[1].str();
     parsed_url.host = match[2].str();
-    parsed_url.path = match[3].matched ? match[3].str() : "/";
+    parsed_url.path = match[4].matched ? match[4].str() : "/";
 
-    // Default ports for HTTP and HTTPS
-    parsed_url.port = (parsed_url.scheme == "https") ? "443" : "80";
+    // Port from URL if provided, otherwise default for scheme
+    parsed_url.port = match[3].matched ? match[3].str() : (parsed_url.scheme == "https" ? "443" : "80");
 
     return parsed_url;
 }
@@ -75,6 +75,7 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
         visited_urls.insert(redirect_url);  // Mark this URL as visited
         ++redirects;
         if (redirects > 10) {
+            std::cerr << "Error: Too many redirects\n";
             std::cout << "error: Too many redirects\n";
             return "";  // Stop after 10 redirects
         }
