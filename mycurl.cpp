@@ -10,7 +10,6 @@
 #include <set>
 #include <ctime>
 #include <sstream>
-#include <cctype>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -27,7 +26,7 @@ Url parse_url(const std::string& url) {
     std::regex url_regex("(https?)://([^/]+)(/.*)?");
     std::smatch match;
     if (!std::regex_match(url, match, url_regex)) {
-        throw std::invalid_argument("invalid url format");
+        throw std::invalid_argument("error");
     }
 
     Url parsed_url;
@@ -162,7 +161,7 @@ void get_url(std::string& url, const std::string& output_file) {
                   << mbps << " [Mbps]\n";
 
     } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        std::cout << "error" << std::endl;
     }
 }
 
