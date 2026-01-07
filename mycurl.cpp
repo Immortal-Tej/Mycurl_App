@@ -65,6 +65,23 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
     if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
         redirect_url = res.base()[http::field::location].to_string();
 
+        // If the Location header is relative (e.g. "/foo"), convert it to an absolute URL
+        if (redirect_url.rfind("http", 0) != 0) {
+            // Parse scheme and host from the current URL
+            size_t scheme_end = url.find("://");
+            if (scheme_end != std::string::npos) {
+                std::string scheme = url.substr(0, scheme_end);
+                size_t host_start = scheme_end + 3;
+                size_t path_pos = url.find('/', host_start);
+                std::string host = (path_pos == std::string::npos) ? url.substr(host_start) : url.substr(host_start, path_pos - host_start);
+                if (!redirect_url.empty() && redirect_url[0] == '/') {
+                    redirect_url = scheme + "://" + host + redirect_url;
+                } else {
+                    redirect_url = scheme + "://" + host + "/" + redirect_url;
+                }
+            }
+        }
+
         // Check if the redirect URL is the same as the current one or has already been visited
         if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
             std::cout << "Redirect loop detected, stopping...\n";
@@ -105,6 +122,8 @@ void get_url(std::string& url, const std::string& output_file) {
         // Track visited URLs to avoid redirects loop
         std::set<std::string> visited_urls;
         visited_urls.insert(url);
+
+        auto start_time = Clock::now();
 
         while (true) {
             // Make HTTP(S) request based on the scheme
@@ -152,11 +171,25 @@ void get_url(std::string& url, const std::string& output_file) {
 
             if (!redirect_url.empty()) {
                 url = redirect_url;  // Update URL with the new redirect URL
+
+                // Re-parse and resolve the new URL for the next iteration
+                parsed_url = parse_url(url);
+                results = resolver.resolve(parsed_url.host, parsed_url.port);
+                visited_urls.insert(url);
+                redirect_url.clear();
+
+                // Close the existing socket so the next connect starts fresh
+                if (socket.is_open()) {
+                    boost::system::error_code ec;
+                    socket.close(ec);
+                }
+
+                continue;
             }
         }
 
         auto end_time = Clock::now();
-        auto duration = std::chrono::duration<double>(end_time - Clock::now()).count();
+        auto duration = std::chrono::duration<double>(end_time - start_time).count();
         double mbps = (body_size * 8.0) / (duration * 1e6);
 
         auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
