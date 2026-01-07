@@ -59,10 +59,7 @@ bool handle_request(const std::string& url, const std::string& outfile, std::str
     asio::io_context io_context;
     tcp::resolver resolver(io_context);
     
-    asio::socket_base::timeout option(30);
     tcp::socket socket(io_context);
-    socket.set_option(option);
-
     auto endpoints = resolver.resolve(u.host, u.port);
     asio::connect(socket, endpoints);
 
@@ -76,7 +73,7 @@ bool handle_request(const std::string& url, const std::string& outfile, std::str
     http::response<http::dynamic_body> res;
     http::read(socket, buffer, res);
 
-    if (res.result() >= http::status::moved_permanently && res.result() < 400) {
+    if (res.result() == http::status::moved_permanently || res.result() == http::status::found) {
         if (res.base().count(http::field::location)) {
             redirect = res.base()[http::field::location].to_string();
             return true;
