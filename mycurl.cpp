@@ -75,7 +75,7 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
         visited_urls.insert(redirect_url);  // Mark this URL as visited
         ++redirects;
         if (redirects > 10) {
-            std::cerr << "Error: Too many redirects\n";
+            std::cout << "error: Too many redirects\n";
             return "";  // Stop after 10 redirects
         }
         return redirect_url;  // Return the new URL for the next redirection
@@ -166,6 +166,7 @@ void get_url(std::string& url, const std::string& output_file) {
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
+        std::cout << "error: " << e.what() << "\n";
     }
 }
 
@@ -182,6 +183,7 @@ int main(int argc, char* argv[]) {
                 break;
             default:
                 std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
+                std::cout << "error: Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
                 return 1;
         }
     }
@@ -190,6 +192,7 @@ int main(int argc, char* argv[]) {
         url = argv[optind];
     } else {
         std::cerr << "URL is required!" << std::endl;
+        std::cout << "error: URL is required!" << std::endl;
         return 1;
     }
 
