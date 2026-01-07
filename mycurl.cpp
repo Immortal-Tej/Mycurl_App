@@ -1,229 +1,193 @@
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <cerrno>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <map>
-#include <vector>
-#include <algorithm>
 #include <iostream>
-#include <memory>
-#include <cctype>
-#include <chrono>
-#include <ctime>
-#include <iomanip>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-// === Cache: new headers
-#include <filesystem>
 #include <fstream>
+#include <boost/asio.hpp>
+#include <boost/beast.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/asio/ssl.hpp>
+#include <chrono>
+#include <iomanip>
+#include <regex>
+#include <set>
+#include <ctime>
 #include <sstream>
 
-namespace fs = std::filesystem;
-
-// Return current local time formatted as "yy-mm-dd hh:mm:ss"
-static std::string now_local_yy_mm_dd_hh_mm_ss()
-{
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    std::time_t t = system_clock::to_time_t(now);
-    std::tm local_tm{};
-#if defined(_WIN32)
-    localtime_s(&local_tm, &t); // thread-safe on Windows
-#else
-    local_tm = *std::localtime(&t); // use localtime_r if available
-    // Alternatively (POSIX): localtime_r(&t, &local_tm);
-#endif
-    std::ostringstream oss;
-    oss << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S");
-    return oss.str();
-}
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace asio = boost::asio;
+namespace ssl = boost::asio::ssl;
+using tcp = asio::ip::tcp;
+using Clock = std::chrono::steady_clock;
 
 struct Url {
-    std::string scheme; // "http" or "https"
-    std::string host;   // hostname or [IPv6]
-    std::string port;   // "80" / "443" / or explicit
-    std::string path;   // always starts with '/', at least "/"
+    std::string scheme, host, port, path;
 };
 
-struct ChunkReadStats {
-    size_t socket_bytes = 0;   // total bytes read from socket during chunked phase
-    size_t body_bytes = 0;     // total bytes appended to 'acc' (payload only)
-    size_t chunks = 0;         // number of chunks successfully appended
-    size_t last_chunk_size = 0;
-    bool eof_in_size_line = false;
-    bool eof_in_chunk_data = false;
-    bool missing_crlf_after_chunk = false;
-};
-
-
-static void to_lower_inplace(std::string &s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-        [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-}
-
-
-static bool is_default_port(const Url& u) {
-    if (u.scheme == "https") return (u.port == "443");
-    if (u.scheme == "http")  return (u.port == "80");
-    return false;
-}
-
-static bool validate_scheme(const Url& u){
-    if (u.scheme == "https") return true;
-    if (u.scheme == "http")  return true;
-    return false;
-}
-
-// Simple URL parser supporting IPv6 literals in brackets, e.g., https://[2001:db8::1]:8443/path
-static bool parse_url(const std::string& input, Url& out, std::string& error) {
-    auto pos = input.find("://");
-    if (pos == std::string::npos) {
-        error = "Invalid URL: missing '://'";
-        return false;
+Url parse_url(const std::string& url) {
+    std::regex url_regex("(https?)://([^/]+)(/.*)?");
+    std::smatch match;
+    if (!std::regex_match(url, match, url_regex)) {
+        throw std::invalid_argument("Invalid URL format");
     }
-    out.scheme = input.substr(0, pos);
-    to_lower_inplace(out.scheme);
 
-    if (!validate_scheme(out)){
-        return false;
+    Url parsed_url;
+    parsed_url.scheme = match[1].str();
+    parsed_url.host = match[2].str();
+    parsed_url.path = match[3].matched ? match[3].str() : "/";
+    parsed_url.port = (parsed_url.scheme == "https") ? "443" : "80";
+
+    return parsed_url;
+}
+
+void print_response(const http::response<http::dynamic_body>& res) {
+    std::cout << "Response Status: " << res.result() << "\n";
+    for (const auto& header : res.base()) {
+        std::cout << header.name_string() << ": " << header.value() << "\n";
     }
-    
-    size_t host_start = pos + 3;
-    size_t path_start = std::string::npos;
-    size_t host_end   = std::string::npos;
+}
 
-    // IPv6 literal?
-    if (host_start < input.size() && input[host_start] == '[') {
-        size_t rb = input.find(']', host_start);
-        if (rb == std::string::npos) {
-            error = "Invalid URL: missing closing ']' for IPv6 address";
-            return false;
+void save_response(const http::response<http::dynamic_body>& res, const std::string& outfile) {
+    if (!outfile.empty()) {
+        std::ofstream ofs(outfile, std::ios::binary);
+        if (!ofs) {
+            throw std::runtime_error("Failed to open output file");
         }
-        out.host = input.substr(host_start, rb - host_start + 1); // include [ ]
-        if (rb + 1 < input.size() && input[rb + 1] == ':') {
-            // port after IPv6
-            size_t port_begin = rb + 2;
-            path_start = input.find('/', port_begin);
-            if (path_start == std::string::npos) {
-                out.port = input.substr(port_begin);
-                out.path = "/";
-                goto finalize_defaults;
+        ofs << boost::beast::buffers_to_string(res.body().data());
+        ofs.close();
+    }
+}
+
+std::string handle_redirect(http::response<http::dynamic_body>& res, const std::string& url, std::string& redirect_url, size_t& redirects, std::set<std::string>& visited_urls) {
+    if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
+        redirect_url = res.base()[http::field::location].to_string();
+        if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
+            std::cout << "Redirect loop detected, stopping...\n";
+            return "";  
+        }
+        std::cout << "Redirecting to: " << redirect_url << "\n";
+        visited_urls.insert(redirect_url);  
+        ++redirects;
+        if (redirects > 10) {
+            std::cerr << "Error: Too many redirects\n";
+            return "";  
+        }
+        return redirect_url;  
+    }
+    return "";  
+}
+
+void get_url(std::string& url, const std::string& output_file) {
+    try {
+        Url parsed_url = parse_url(url);
+
+        asio::io_context io_context;
+        tcp::resolver resolver(io_context);
+        tcp::socket socket(io_context);
+
+        auto results = resolver.resolve(parsed_url.host, parsed_url.port);
+
+        std::string redirect_url;
+        size_t redirects = 0;
+        size_t body_size = 0;
+
+        std::set<std::string> visited_urls;
+        visited_urls.insert(url);
+
+        while (true) {
+            if (parsed_url.scheme == "https") {
+                ssl::context ssl_context(ssl::context::tls_client);
+                ssl::stream<tcp::socket> ssl_stream(io_context, ssl_context);
+                asio::connect(ssl_stream.next_layer(), results.begin(), results.end());
+                ssl_stream.handshake(ssl::stream_base::client);
+
+                http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11};
+                req.set(http::field::host, parsed_url.host);
+                req.set(http::field::user_agent, "mycurl");
+
+                http::write(ssl_stream, req);
+                beast::flat_buffer buffer;
+                http::response<http::dynamic_body> res;
+                http::read(ssl_stream, buffer, res);
+
+                X509* cert = SSL_get_peer_certificate(ssl_stream.native_handle());
+                if (cert) {
+                    char subj[512], iss[512];
+                    X509_NAME_oneline(X509_get_subject_name(cert), subj, sizeof(subj));
+                    X509_NAME_oneline(X509_get_issuer_name(cert), iss, sizeof(iss));
+                    std::cout << "Server certificate:\n";
+                    std::cout << "  Subject: " << subj << "\n";
+                    std::cout << "  Issuer:  " << iss << "\n";
+                    X509_free(cert);
+                }
+
+                print_response(res);
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  
+                if (redirect_url.empty()) break;  
+
+                body_size = res.body().size();
+                save_response(res, output_file);
             } else {
-                out.port = input.substr(port_begin, path_start - port_begin);
+                asio::connect(socket, results.begin(), results.end());
+
+                http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11};
+                req.set(http::field::host, parsed_url.host);
+                req.set(http::field::user_agent, "mycurl");
+
+                http::write(socket, req);
+                beast::flat_buffer buffer;
+                http::response<http::dynamic_body> res;
+                http::read(socket, buffer, res);
+
+                print_response(res);
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  
+                if (redirect_url.empty()) break;  
+
+                body_size = res.body().size();
+                save_response(res, output_file);
             }
-        } else {
-            // no port, next '/' starts path
-            path_start = input.find('/', rb + 1);
+
+            if (!redirect_url.empty()) {
+                url = redirect_url;  
+            }
         }
-        host_end = (path_start == std::string::npos) ? input.size() : path_start; // host already set
-    } else {
-        // IPv4 or name: host[:port][/path]
-        path_start = input.find('/', host_start);
-        host_end   = (path_start == std::string::npos) ? input.size() : path_start;
-        size_t colon = input.find(':', host_start);
-        if (colon != std::string::npos && colon < host_end) {
-            out.host = input.substr(host_start, colon - host_start);
-            out.port = input.substr(colon + 1, host_end - (colon + 1));
-        } else {
-            out.host = input.substr(host_start, host_end - host_start);
-        }
-    }
 
-    if (out.host.empty()) {
-        error = "Invalid URL: empty host";
-        return false;
-    }
+        auto end_time = Clock::now();
+        auto duration = std::chrono::duration<double>(end_time - Clock::now()).count();
+        double mbps = (body_size * 8.0) / (duration * 1e6);
 
-    if (path_start == std::string::npos) {
-        out.path = "/";
-    } else {
-        out.path = input.substr(path_start);
-        if (out.path.empty()) out.path = "/";
-    }
+        auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::cout << std::put_time(std::localtime(&now), "%F %T") << " "
+                  << url << " " << body_size << " [bytes] "
+                  << duration << " [s] "
+                  << mbps << " [Mbps]\n";
 
-finalize_defaults:
-    // Default port by scheme
-    if (out.port.empty()) {
-        if (out.scheme == "https") out.port = "443";
-        else if (out.scheme == "http") out.port = "80";
-        else {
-            error = "Unsupported scheme: " + out.scheme;
-            return false;
-        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
     }
-
-    // Validate port
-    if (!std::all_of(out.port.begin(), out.port.end(), ::isdigit)) {
-        error = "Invalid port: " + out.port;
-        return false;
-    }
-
-    return true;
 }
-
 
 int main(int argc, char* argv[]) {
-    bool cache_enabled = false;
-    std::string url_str;
+    std::string url;
     std::string output_file;
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        if (a == "--cache") cache_enabled = true;
-	else if (a == "-o" || a == "--output") {
-            if (i + 1 >= argc) {
-	      std::fprintf(stdout, "-o/--output requires a filename (or - for stdout)\n");
-	      std::fprintf(stdout, "Usage: %s [--cache] [-o <file|->] url\n", argv[0]);
-	      return EXIT_FAILURE;
-            }
-            output_file = argv[++i];
-        }
-        else if (!a.empty() && a[0] == '-') {
-            std::fprintf(stdout, "Error Unknown option: %s\n", a.c_str());
-            std::fprintf(stdout, "Usage: %s [--cache] -o <file>|-> url\n", argv[0]);
-            return EXIT_FAILURE;
-        } else {
-            url_str = a;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "o:")) != -1) {
+        switch (opt) {
+            case 'o':
+                output_file = optarg;
+                break;
+            default:
+                std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
+                return 1;
         }
     }
-    if (url_str.empty()) {
-        std::fprintf(stdout, "Usage: %s [--cache] url\n", argv[0]);
-        return EXIT_FAILURE;
+
+    if (optind < argc) {
+        url = argv[optind];
+    } else {
+        std::cerr << "URL is required!" << std::endl;
+        return 1;
     }
 
-    Url url;
-    std::string error;
-    if (!parse_url(url_str, url, error)) {
-        std::fprintf(stdout, "ERROR URL parse error: %s\n", error.c_str());
-        return EXIT_FAILURE;
-    }
-
-    std::printf("Protocol: %s, Host %s, port = %s, path = %s, ",
-                url.scheme.c_str(), url.host.c_str(), url.port.c_str(), url.path.c_str());
-    std::printf("Output: %s\n", output_file.c_str());
-
-    const int max_redirects = 10;
-    int redirects = 0;
-    using clock = std::chrono::steady_clock;
-
-    auto t1 = clock::now();
-    
-    /* do stuff */
-    int resp_body_size=0xFACCE;
-    
-
-    auto t2 = clock::now();
-    std::chrono::duration<double> diff = t2 - t1; // seconds
-    std::cout << std::fixed << std::setprecision(6);
-    std::cout << now_local_yy_mm_dd_hh_mm_ss() << " " << url_str << " " << resp_body_size << " [bytes] " << diff.count()
-              << " [s] " << (8*resp_body_size/diff.count())/1e6 << " [Mbps]\n";
-
-
-
-    
-    return EXIT_SUCCESS;
+    get_url(url, output_file);
+    return 0;
 }
