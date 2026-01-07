@@ -170,15 +170,21 @@ int main(int argc, char* argv[]) {
     std::string output_file;
 
     int opt;
+    bool invalid_option = false;
     while ((opt = getopt(argc, argv, "o:")) != -1) {
         switch (opt) {
             case 'o':
                 output_file = optarg;
                 break;
             default:
-                std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
-                return 1;
+                invalid_option = true;
+                break;
         }
+    }
+
+    if (invalid_option) {
+        std::cout << "error" << std::endl;
+        return 1;
     }
 
     if (optind < argc) {
