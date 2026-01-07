@@ -1,200 +1,198 @@
 #include <iostream>
-#include <string>
-#include <stdexcept>
-#include <regex>
-#include <chrono>
-#include <iomanip>
+#include <fstream>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
+#include <boost/beast/ssl.hpp>
 #include <boost/asio/ssl.hpp>
-#include <openssl/x509.h>
-#include <openssl/x509v3.h>
-#include <filesystem>
-#include <getopt.h>
+#include <chrono>
+#include <iomanip>
+#include <regex>
+#include <set>
 
 namespace beast = boost::beast;
-namespace net = boost::asio;
+namespace http = beast::http;
+namespace asio = boost::asio;
 namespace ssl = boost::asio::ssl;
-using tcp = net::ip::tcp;
+using tcp = asio::ip::tcp;
+using Clock = std::chrono::steady_clock;
 
+// Struct to store URL components
 struct Url {
-    std::string scheme;
-    std::string host;
-    std::string port;
-    std::string target;
+    std::string scheme, host, port, path;
 };
 
-std::optional<Url> parse_url(const std::string& url) {
-    std::regex url_regex(R"((https?)://([^:/]+)(?::(\d+))?(/.*)?)");
+// Parse the URL into scheme, host, port, and path
+Url parse_url(const std::string& url) {
+    std::regex url_regex("(https?)://([^/]+)(/.*)?");
     std::smatch match;
-
-    if (std::regex_match(url, match, url_regex)) {
-        Url result;
-        result.scheme = match[1].str();
-        result.host = match[2].str();
-        result.port = match[3].matched ? match[3].str() : (result.scheme == "https" ? "443" : "80");
-        result.target = match[4].matched ? match[4].str() : "/";
-        return result;
+    if (!std::regex_match(url, match, url_regex)) {
+        throw std::invalid_argument("Invalid URL format");
     }
-    return std::nullopt;
+
+    Url parsed_url;
+    parsed_url.scheme = match[1].str();
+    parsed_url.host = match[2].str();
+    parsed_url.path = match[3].matched ? match[3].str() : "/";
+
+    // Default ports for HTTP and HTTPS
+    parsed_url.port = (parsed_url.scheme == "https") ? "443" : "80";
+
+    return parsed_url;
 }
 
-void display_certificate_info(ssl::stream<tcp::socket>& stream) {
-    X509* cert = SSL_get_peer_certificate(stream.native_handle());
-    if (!cert) {
-        std::cerr << "Error: No certificate found.\n";
-        return;
+// Print response details
+void print_response(const http::response<http::dynamic_body>& res) {
+    std::cout << "Response Status: " << res.result() << "\n";
+    for (const auto& header : res.base()) {
+        std::cout << header.name_string() << ": " << header.value() << "\n";
     }
-
-    std::string subj(512, '\0');
-    std::string iss(512, '\0');
-
-    if (X509_NAME_oneline(X509_get_subject_name(cert), &subj[0], subj.size()) == nullptr ||
-        X509_NAME_oneline(X509_get_issuer_name(cert), &iss[0], iss.size()) == nullptr) {
-        std::cerr << "Error: Failed to get certificate details.\n";
-        X509_free(cert);
-        return;
-    }
-
-    std::cout << "Server certificate:\n"
-              << "  Subject: " << subj << "\n"
-              << "  Issuer:  " << iss << "\n";
-    X509_free(cert);
 }
 
-bool perform_request(const std::string& url, const std::string& outfile, std::string& redirect, std::size_t& body_size) {
-    auto u = parse_url(url);
-    if (!u) {
-        std::cerr << "Invalid URL format.\n";
-        return false;
+// Save response to file
+void save_response(const http::response<http::dynamic_body>& res, const std::string& outfile) {
+    if (!outfile.empty()) {
+        std::ofstream ofs(outfile, std::ios::binary);
+        if (!ofs) {
+            throw std::runtime_error("Failed to open output file");
+        }
+        ofs << boost::beast::buffers_to_string(res.body().data());
+        ofs.close();
     }
+}
 
-    net::io_context ioc;
-    tcp::resolver resolver(ioc);
-    redirect.clear();
-    body_size = 0;
+// Handle HTTP redirects with a limit of 10
+std::string handle_redirect(http::response<http::dynamic_body>& res, const std::string& url, std::string& redirect_url, size_t& redirects, std::set<std::string>& visited_urls) {
+    if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
+        redirect_url = res.base()[http::field::location].to_string();
 
-    auto results = resolver.resolve(u->host, u->port);
-    auto handle_response = [&](auto& stream) -> bool {
-        http::request<http::empty_body> req{http::verb::get, u->target, 11};
-        req.set(http::field::host, u->host);
-        req.set(http::field::user_agent, "mycurl");
+        // Check if the redirect URL is the same as the current one or has already been visited
+        if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
+            std::cout << "Redirect loop detected, stopping...\n";
+            return "";  // Return empty to stop redirects
+        }
 
-        http::write(stream, req);
-        beast::flat_buffer buffer;
+        std::cout << "Redirecting to: " << redirect_url << "\n";
+        visited_urls.insert(redirect_url);  // Mark this URL as visited
+        ++redirects;
+        if (redirects > 10) {
+            std::cerr << "Error: Too many redirects\n";
+            return "";  // Stop after 10 redirects
+        }
+        return redirect_url;  // Return the new URL for the next redirection
+    }
+    return "";  // No redirection
+}
 
-        if (outfile.empty()) {
-            http::response<http::dynamic_body> res;
-            http::read(stream, buffer, res);
+// Perform the HTTP(S) request and handle the response
+void get_url(std::string& url, const std::string& output_file) {
+    try {
+        // Parse the URL into components
+        Url parsed_url = parse_url(url);
 
-            for (auto const& h : res.base()) std::cout << h.name_string() << ": " << h.value() << "\n";
+        asio::io_context io_context;
+        tcp::resolver resolver(io_context);
+        tcp::socket socket(io_context);
 
-            if (res.result_int() >= 300 && res.result_int() < 400 && res.base().count(http::field::location)) {
-                redirect = res.base()[http::field::location].to_string();
-                return true;
+        // Resolve the host
+        auto results = resolver.resolve(parsed_url.host, parsed_url.port);
+
+        // Initialize response variables
+        std::string redirect_url;
+        size_t redirects = 0;
+        size_t body_size = 0;
+
+        // Track visited URLs to avoid redirects loop
+        std::set<std::string> visited_urls;
+        visited_urls.insert(url);
+
+        while (true) {
+            // Make HTTP(S) request based on the scheme
+            if (parsed_url.scheme == "https") {
+                ssl::context ssl_context(ssl::context::tls_client);
+                ssl::stream<tcp::socket> ssl_stream(io_context, ssl_context);
+                asio::connect(ssl_stream.next_layer(), results.begin(), results.end());
+                ssl_stream.handshake(ssl::stream_base::client);
+
+                http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11};
+                req.set(http::field::host, parsed_url.host);
+                req.set(http::field::user_agent, "mycurl");
+
+                http::write(ssl_stream, req);
+                beast::flat_buffer buffer;
+                http::response<http::dynamic_body> res;
+                http::read(ssl_stream, buffer, res);
+
+                print_response(res);
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
+                if (redirect_url.empty()) break;  // If no more redirects, break out of loop
+
+                body_size = res.body().size();
+                save_response(res, output_file);
+            } else {
+                // HTTP (non-SSL)
+                asio::connect(socket, results.begin(), results.end());
+
+                http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11};
+                req.set(http::field::host, parsed_url.host);
+                req.set(http::field::user_agent, "mycurl");
+
+                http::write(socket, req);
+                beast::flat_buffer buffer;
+                http::response<http::dynamic_body> res;
+                http::read(socket, buffer, res);
+
+                print_response(res);
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
+                if (redirect_url.empty()) break;  // If no more redirects, break out of loop
+
+                body_size = res.body().size();
+                save_response(res, output_file);
             }
 
-            body_size = res.body().size();
-            return false;
+            if (!redirect_url.empty()) {
+                url = redirect_url;  // Update URL with the new redirect URL
+            }
         }
 
-        http::response<http::file_body> res;
-        beast::error_code ec;
-        res.body().open(outfile.c_str(), beast::file_mode::write, ec);
-        if (ec) throw beast::system_error(ec);
+        auto end_time = Clock::now();
+        auto duration = std::chrono::duration<double>(end_time - Clock::now()).count();
+        double mbps = (body_size * 8.0) / (duration * 1e6);
 
-        http::read(stream, buffer, res);
+        auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::cout << std::put_time(std::localtime(&now), "%F %T") << " "
+                  << url << " " << body_size << " [bytes] "
+                  << duration << " [s] "
+                  << mbps << " [Mbps]\n";
 
-        for (auto const& h : res.base()) std::cout << h.name_string() << ": " << h.value() << "\n";
-
-        res.body().close();
-        body_size = std::filesystem::file_size(outfile);
-        return false;
-    };
-
-    try {
-        if (u->scheme == "https") {
-            ssl::context ctx(ssl::context::tls_client);
-            ctx.set_default_verify_paths();
-
-            ssl::stream<tcp::socket> stream(ioc, ctx);
-            SSL_set_tlsext_host_name(stream.native_handle(), u->host.c_str());
-            net::connect(stream.next_layer(), results);
-            stream.handshake(ssl::stream_base::client);
-
-            display_certificate_info(stream);
-            return handle_response(stream);
-        } else {
-            tcp::socket socket(ioc);
-            net::connect(socket, results);
-            return handle_response(socket);
-        }
-    } catch (const beast::system_error& se) {
-        std::cerr << "Error: " << se.what() << std::endl;
-        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
     }
 }
 
 int main(int argc, char* argv[]) {
-    try {
-        std::string outfile;
-        std::string redirect;
-        std::size_t body_size = 0;
-        int redirects = 0;
+    std::string url;
+    std::string output_file;
 
-        static option opts[] = {
-            {"output", required_argument, nullptr, 'o'},
-            {0, 0, 0, 0}
-        };
-
-        int c;
-        while ((c = getopt_long(argc, argv, "o:", opts, nullptr)) != -1) {
-            if (c == 'o') {
-                outfile = optarg;
-            } else {
-                std::cout << "Error: unsupported option\n";
+    // Argument parsing using getopt
+    int opt;
+    while ((opt = getopt(argc, argv, "o:")) != -1) {
+        switch (opt) {
+            case 'o':
+                output_file = optarg;
+                break;
+            default:
+                std::cerr << "Usage: " << argv[0] << " [-o output_file] URL" << std::endl;
                 return 1;
-            }
         }
+    }
 
-        if (optind >= argc) {
-            std::cout << "Error: missing URL\n";
-            return 1;
-        }
-
-        std::string url = argv[optind];
-        auto t0 = std::chrono::steady_clock::now();
-
-        while (true) {
-            bool is_redirect = perform_request(url, "", redirect, body_size);
-            if (!is_redirect) break;
-
-            std::cout << "Redirecting to: " << redirect << "\n";
-            url = redirect;
-
-            if (++redirects > 10) {
-                std::cout << "Error: too many redirects\n";
-                return 1;
-            }
-        }
-
-        perform_request(url, outfile, redirect, body_size);
-
-        auto t1 = std::chrono::steady_clock::now();
-        double secs = std::chrono::duration<double>(t1 - t0).count();
-        double mbps = (body_size * 8.0) / (secs * 1e6);
-
-        auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::cout << std::put_time(std::localtime(&now), "%F %T") << " "
-                  << url << " "
-                  << body_size << " [bytes] "
-                  << std::fixed << std::setprecision(6)
-                  << secs << " [s] "
-                  << mbps << " [Mbps]\n";
-
-        return 0;
-    } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n";
+    if (optind < argc) {
+        url = argv[optind];
+    } else {
+        std::cerr << "URL is required!" << std::endl;
         return 1;
     }
+
+    get_url(url, output_file);
+    return 0;
 }
