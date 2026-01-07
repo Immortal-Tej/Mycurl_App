@@ -39,7 +39,6 @@ Url parse_url(const std::string& url) {
 }
 
 void print_response(const http::response<http::dynamic_body>& res) {
-    std::cout << "Response Status: " << res.result() << "\n";
     for (const auto& header : res.base()) {
         std::cout << header.name_string() << ": " << header.value() << "\n";
     }
@@ -108,17 +107,6 @@ void get_url(std::string& url, const std::string& output_file) {
                 http::response<http::dynamic_body> res;
                 http::read(ssl_stream, buffer, res);
 
-                X509* cert = SSL_get_peer_certificate(ssl_stream.native_handle());
-                if (cert) {
-                    char subj[512], iss[512];
-                    X509_NAME_oneline(X509_get_subject_name(cert), subj, sizeof(subj));
-                    X509_NAME_oneline(X509_get_issuer_name(cert), iss, sizeof(iss));
-                    std::cout << "Server certificate:\n";
-                    std::cout << "  Subject: " << subj << "\n";
-                    std::cout << "  Issuer:  " << iss << "\n";
-                    X509_free(cert);
-                }
-
                 print_response(res);
                 redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  
                 if (redirect_url.empty()) break;  
@@ -177,7 +165,7 @@ int main(int argc, char* argv[]) {
                 output_file = optarg;
                 break;
             default:
-                break;
+                break; // Ignore any unsupported options
         }
     }
 
