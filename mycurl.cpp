@@ -16,12 +16,10 @@ namespace ssl = boost::asio::ssl;
 using tcp = asio::ip::tcp;
 using Clock = std::chrono::steady_clock;
 
-// Struct to store URL components
 struct Url {
     std::string scheme, host, port, path;
 };
 
-// Parse the URL into scheme, host, port, and path
 Url parse_url(const std::string& url) {
     std::regex url_regex("(https?)://([^/:]+)(?::(\\d+))?(/.*)?");
     std::smatch match;
@@ -34,13 +32,11 @@ Url parse_url(const std::string& url) {
     parsed_url.host = match[2].str();
     parsed_url.path = match[4].matched ? match[4].str() : "/";
 
-    // Port from URL if provided, otherwise default for scheme
     parsed_url.port = match[3].matched ? match[3].str() : (parsed_url.scheme == "https" ? "443" : "80");
 
     return parsed_url;
 }
 
-// Print response details
 void print_response(const http::response<http::dynamic_body>& res) {
     std::cout << "Response Status: " << res.result() << "\n";
     for (const auto& header : res.base()) {
@@ -48,7 +44,6 @@ void print_response(const http::response<http::dynamic_body>& res) {
     }
 }
 
-// Save response to file
 void save_response(const http::response<http::dynamic_body>& res, const std::string& outfile) {
     if (!outfile.empty()) {
         std::ofstream ofs(outfile, std::ios::binary);
@@ -60,18 +55,14 @@ void save_response(const http::response<http::dynamic_body>& res, const std::str
     }
 }
 
-// Handle HTTP redirects with a limit of 10
 std::string handle_redirect(http::response<http::dynamic_body>& res, const std::string& url, std::string& redirect_url, size_t& redirects, std::set<std::string>& visited_urls) {
-    // First try standard Location header
     if (res.result_int() >= 300 && res.result_int() < 400) {
         if (res.base().count(http::field::location)) {
             redirect_url = res.base()[http::field::location].to_string();
         } else {
-            // Fallback: some servers embed a link in an HTML body instead of Location header
             try {
                 std::string body = boost::beast::buffers_to_string(res.body().data());
                 std::smatch m;
-                // Look for <meta http-equiv="refresh" content="0;URL='...'"> or <a href="...">
                 std::regex meta_re("<meta[^>]*refresh[^>]*content=[\"']?\s*\d+;\s*url=([^\"'>]+)[\"'>]?", std::regex::icase);
                 std::regex href_re("<a[^>]*href=[\"']?([^\"'>]+)[\"'>]?", std::regex::icase);
                 if (std::regex_search(body, m, meta_re) && m.size() > 1) {
@@ -79,22 +70,17 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
                 } else if (std::regex_search(body, m, href_re) && m.size() > 1) {
                     redirect_url = m[1].str();
                 }
-            } catch (...) {
-                // ignore parsing errors, treat as no Location found
-            }
+            } catch (...) {}
         }
 
         if (!redirect_url.empty()) {
-            // Handle protocol-relative URLs (e.g. //host/path)
             if (redirect_url.rfind("//", 0) == 0) {
                 size_t scheme_end = url.find("://");
                 std::string scheme = (scheme_end != std::string::npos) ? url.substr(0, scheme_end) : "http";
                 redirect_url = scheme + ":" + redirect_url;
             }
 
-            // If the Location header is relative (e.g. "/foo" or "foo"), convert it to an absolute URL
             if (redirect_url.rfind("http", 0) != 0) {
-                // Parse scheme and host from the current URL
                 size_t scheme_end = url.find("://");
                 if (scheme_end != std::string::npos) {
                     std::string scheme = url.substr(0, scheme_end);
@@ -109,52 +95,45 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
                 }
             }
 
-            // Check if the redirect URL is the same as the current one or has already been visited
             if (visited_urls.find(redirect_url) != visited_urls.end() || redirect_url == url) {
                 std::cout << "Redirect loop detected, stopping...\n";
-                return "";  // Return empty to stop redirects
+                return "";
             }
 
             std::cout << "Redirecting to: " << redirect_url << "\n";
-            visited_urls.insert(redirect_url);  // Mark this URL as visited
+            visited_urls.insert(redirect_url);
             ++redirects;
             if (redirects > 10) {
                 std::cerr << "Error: Too many redirects\n";
                 std::cout << "error: Too many redirects\n";
-                return "";  // Stop after 10 redirects
+                return "";
             }
-            return redirect_url;  // Return the new URL for the next redirection
+            return redirect_url;
         }
     }
-    return "";  // No redirection
+    return "";
 }
 
-// Perform the HTTP(S) request and handle the response
 void get_url(std::string& url, const std::string& output_file) {
     try {
-        // Parse the URL into components
         Url parsed_url = parse_url(url);
 
         asio::io_context io_context;
         tcp::resolver resolver(io_context);
         tcp::socket socket(io_context);
 
-        // Resolve the host
         auto results = resolver.resolve(parsed_url.host, parsed_url.port);
 
-        // Initialize response variables
         std::string redirect_url;
         size_t redirects = 0;
         size_t body_size = 0;
 
-        // Track visited URLs to avoid redirects loop
         std::set<std::string> visited_urls;
         visited_urls.insert(url);
 
         auto start_time = Clock::now();
 
         while (true) {
-            // Make HTTP(S) request based on the scheme
             if (parsed_url.scheme == "https") {
                 ssl::context ssl_context(ssl::context::tls_client);
                 ssl::stream<tcp::socket> ssl_stream(io_context, ssl_context);
@@ -171,16 +150,13 @@ void get_url(std::string& url, const std::string& output_file) {
                 http::read(ssl_stream, buffer, res);
 
                 print_response(res);
-                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);
                 if (redirect_url.empty()) {
-                    // No redirect -> this is the final response, save it
                     body_size = res.body().size();
                     save_response(res, output_file);
-                    break;  // Done
+                    break;
                 }
-                // Otherwise there's a redirect -> do not save this response body, follow the redirect
             } else {
-                // HTTP (non-SSL)
                 asio::connect(socket, results.begin(), results.end());
 
                 http::request<http::empty_body> req{http::verb::get, parsed_url.path, 11};
@@ -193,26 +169,21 @@ void get_url(std::string& url, const std::string& output_file) {
                 http::read(socket, buffer, res);
 
                 print_response(res);
-                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  // Handle potential redirects
+                redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);
                 if (redirect_url.empty()) {
-                    // No redirect -> this is the final response, save it
                     body_size = res.body().size();
                     save_response(res, output_file);
-                    break;  // Done
+                    break;
                 }
-                // Otherwise there's a redirect -> do not save this response body, follow the redirect
             }
 
             if (!redirect_url.empty()) {
-                url = redirect_url;  // Update URL with the new redirect URL
-
-                // Re-parse and resolve the new URL for the next iteration
+                url = redirect_url;
                 parsed_url = parse_url(url);
                 results = resolver.resolve(parsed_url.host, parsed_url.port);
                 visited_urls.insert(url);
                 redirect_url.clear();
 
-                // Close the existing socket so the next connect starts fresh
                 if (socket.is_open()) {
                     boost::system::error_code ec;
                     socket.close(ec);
@@ -242,7 +213,6 @@ int main(int argc, char* argv[]) {
     std::string url;
     std::string output_file;
 
-    // Simple argument parsing to support -o and --output
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-o") {
@@ -267,7 +237,6 @@ int main(int argc, char* argv[]) {
                 }
             }
         } else if (!arg.empty() && arg[0] == '-') {
-            // Unknown option
             std::string optname = arg.size() > 1 ? arg.substr(1) : arg;
             std::cerr << "Error: Invalid option -- '" << optname << "'" << std::endl;
             std::cout << "error: invalid option -- '" << optname << "'" << std::endl;
@@ -278,7 +247,6 @@ int main(int argc, char* argv[]) {
             if (url.empty()) {
                 url = arg;
             } else {
-                // ignore extra positional arguments
             }
         }
     }
