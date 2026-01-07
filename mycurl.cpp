@@ -177,14 +177,8 @@ int main(int argc, char* argv[]) {
                 output_file = optarg;
                 break;
             default:
-                invalid_option = true;
-                break;
+                break; // Ignore any other options
         }
-    }
-
-    if (invalid_option) {
-        std::cout << "error" << std::endl;
-        return 1;
     }
 
     if (optind < argc) {
