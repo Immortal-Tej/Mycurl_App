@@ -1,16 +1,14 @@
-CXX      := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2
-LDFLAGS  := 
-LDLIBS   := -lssl -lcrypto -lpthread
-TARGET   := mycurl
-SRC      := mycurl.cpp
+CXX := g++
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -pedantic
+LDFLAGS := -lssl -lcrypto -lboost_system -lpthread
+
+TARGET := mycurl
+SRC := mycurl.cpp
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET)
-
-.PHONY: all clean
