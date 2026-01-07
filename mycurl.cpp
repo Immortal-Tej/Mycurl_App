@@ -18,17 +18,21 @@ using tcp       = asio::ip::tcp;
 class HttpClient {
 public:
     HttpClient(const std::string& url, const std::string& outputFile)
-        : url_(url), outputFile_(outputFile), ioContext_(), resolver_(ioContext_), socket_(ioContext_) {
+        : url_(url), outputFile_(outputFile), ioContext_(), resolver_(ioContext_)
+    {
         parseUrl();
     }
 
     void makeRequest() {
         resolve();
-        connect();
         if (protocol_ == "https") {
-            makeSslRequest();
+            sslStream_ = std::make_unique<ssl::stream<tcp::socket>>(ioContext_, sslContext_);
+            connectSsl();
+            makeRequestInternal();
         } else {
-            makeHttpRequest();
+            socket_ = std::make_unique<tcp::socket>(ioContext_);
+            connect();
+            makeRequestInternal();
         }
     }
 
@@ -36,8 +40,9 @@ private:
     std::string url_, outputFile_;
     asio::io_context ioContext_;
     tcp::resolver resolver_;
-    tcp::socket socket_;
-    ssl::stream<tcp::socket> sslStream_;
+    std::unique_ptr<tcp::socket> socket_;
+    std::unique_ptr<ssl::stream<tcp::socket>> sslStream_;
+    ssl::context sslContext_{ssl::context::tls_client};
     std::string host_, path_, port_, protocol_;
     int redirectCount_ = 0;
 
@@ -57,38 +62,40 @@ private:
 
     void resolve() {
         auto endpoints = resolver_.resolve(host_, port_);
-        asio::connect(socket_, endpoints);
+        if (protocol_ == "https") {
+            socket_ = nullptr; // No TCP socket needed for SSL stream, it's handled by sslStream_
+        }
+        else {
+            socket_ = std::make_unique<tcp::socket>(ioContext_);
+            asio::connect(*socket_, endpoints);
+        }
     }
 
-    void makeSslRequest() {
-        ssl::context ctx(ssl::context::tls_client);
-        ctx.set_default_verify_paths();
-
-        sslStream_ = ssl::stream<tcp::socket>(ioContext_, ctx);
-        sslStream_.handshake(ssl::stream_base::client);
-        sendRequest();
+    void connectSsl() {
+        asio::connect(sslStream_->next_layer(), resolver_.resolve(host_, port_));
+        sslStream_->handshake(ssl::stream_base::client);
     }
 
-    void makeHttpRequest() {
-        sendRequest();
+    void connect() {
+        asio::connect(*socket_, resolver_.resolve(host_, port_));
     }
 
-    void sendRequest() {
+    void makeRequestInternal() {
         http::request<http::empty_body> req{http::verb::get, path_, 11};
         req.set(http::field::host, host_);
-        req.set(http::field::user_agent, "custom-curl");
+        req.set(http::field::user_agent, "mycurl");
 
         if (protocol_ == "https") {
-            http::write(sslStream_, req);
+            http::write(*sslStream_, req);
             beast::flat_buffer buffer;
             http::response<http::dynamic_body> res;
-            http::read(sslStream_, buffer, res);
+            http::read(*sslStream_, buffer, res);
             handleResponse(res);
         } else {
-            http::write(socket_, req);
+            http::write(*socket_, req);
             beast::flat_buffer buffer;
             http::response<http::dynamic_body> res;
-            http::read(socket_, buffer, res);
+            http::read(*socket_, buffer, res);
             handleResponse(res);
         }
     }
