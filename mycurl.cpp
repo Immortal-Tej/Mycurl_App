@@ -1,3 +1,4 @@
+#include <getopt.h>
 #include <iostream>
 #include <fstream>
 #include <boost/asio.hpp>
@@ -37,13 +38,16 @@ Url parse_url(const std::string& url) {
     return parsed_url;
 }
 
-void print_response(const http::response<http::dynamic_body>& res) {
-    for (const auto& header : res.base()) {
-        std::cout << header.name_string() << ": " << header.value() << "\n";
+
+void print_response(const http::response<http::dynamic_body>& res, bool silent) {
+    if (!silent) {
+        for (const auto& header : res.base()) {
+            std::cout << header.name_string() << ": " << header.value() << "\n";
+        }
     }
 }
 
-
+// Function to save the response to a file
 void save_response(const http::response<http::dynamic_body>& res, const std::string& outfile) {
     if (!outfile.empty()) {
         std::ofstream ofs(outfile, std::ios::binary);
@@ -75,7 +79,7 @@ std::string handle_redirect(http::response<http::dynamic_body>& res, const std::
     return "";  
 }
 
-void get_url(std::string& url, const std::string& output_file) {
+void get_url(std::string& url, const std::string& output_file, bool silent) {
     try {
         Url parsed_url = parse_url(url);
 
@@ -108,7 +112,7 @@ void get_url(std::string& url, const std::string& output_file) {
                 http::response<http::dynamic_body> res;
                 http::read(ssl_stream, buffer, res);
 
-                print_response(res);
+                print_response(res, silent);
                 redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  
                 if (redirect_url.empty()) break;  
 
@@ -126,7 +130,7 @@ void get_url(std::string& url, const std::string& output_file) {
                 http::response<http::dynamic_body> res;
                 http::read(socket, buffer, res);
 
-                print_response(res);
+                print_response(res, silent);
                 redirect_url = handle_redirect(res, url, redirect_url, redirects, visited_urls);  
                 if (redirect_url.empty()) break;  
 
@@ -157,13 +161,16 @@ void get_url(std::string& url, const std::string& output_file) {
 int main(int argc, char* argv[]) {
     std::string url;
     std::string output_file;
+    bool silent = false;
 
     int opt;
-    bool invalid_option = false;
-    while ((opt = getopt(argc, argv, "o:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:s")) != -1) {
         switch (opt) {
             case 'o':
                 output_file = optarg;
+                break;
+            case 's':
+                silent = true;
                 break;
             default:
                 break;
@@ -177,6 +184,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    get_url(url, output_file);
+    get_url(url, output_file, silent);
     return 0;
 }
